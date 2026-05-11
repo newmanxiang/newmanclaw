@@ -1,3 +1,4 @@
 data/retail.db
+data/seed/*.csv
 __pycache__/
 *.pyc

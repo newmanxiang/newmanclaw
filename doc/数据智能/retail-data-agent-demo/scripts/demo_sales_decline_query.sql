@@ -37,6 +37,26 @@ category_delta AS (
     FROM period_orders
     WHERE period_name IS NOT NULL
     GROUP BY category_l1
+),
+store_delta AS (
+    SELECT
+        store_name,
+        ROUND(SUM(CASE WHEN period_name = 'current_7d' THEN gmv ELSE 0 END), 2) AS current_gmv,
+        ROUND(SUM(CASE WHEN period_name = 'previous_7d' THEN gmv ELSE 0 END), 2) AS previous_gmv,
+        ROUND(SUM(CASE WHEN period_name = 'current_7d' THEN gmv ELSE -gmv END), 2) AS delta_gmv
+    FROM period_orders
+    WHERE period_name IS NOT NULL
+    GROUP BY store_name
+),
+channel_delta AS (
+    SELECT
+        channel,
+        ROUND(SUM(CASE WHEN period_name = 'current_7d' THEN gmv ELSE 0 END), 2) AS current_gmv,
+        ROUND(SUM(CASE WHEN period_name = 'previous_7d' THEN gmv ELSE 0 END), 2) AS previous_gmv,
+        ROUND(SUM(CASE WHEN period_name = 'current_7d' THEN gmv ELSE -gmv END), 2) AS delta_gmv
+    FROM period_orders
+    WHERE period_name IS NOT NULL
+    GROUP BY channel
 )
 SELECT
     'overall' AS section,
@@ -53,4 +73,20 @@ SELECT
     previous_gmv,
     delta_gmv
 FROM category_delta
+UNION ALL
+SELECT
+    'store_delta' AS section,
+    store_name AS item,
+    current_gmv,
+    previous_gmv,
+    delta_gmv
+FROM store_delta
+UNION ALL
+SELECT
+    'channel_delta' AS section,
+    channel AS item,
+    current_gmv,
+    previous_gmv,
+    delta_gmv
+FROM channel_delta
 ORDER BY section, delta_gmv;
