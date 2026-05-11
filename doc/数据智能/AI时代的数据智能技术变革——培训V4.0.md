@@ -1026,14 +1026,392 @@ Agent的表现：
 ### 【实操篇接口：在Claude Code上构建Data Agent（另行生成）】
 
 > *（本稿仅保留实操目标、知识层级和预期效果；脚本、SQLite样例库、Prompt、演示步骤将在独立材料中生成。）*
+> *演示定位：不用无线网络业务，改用更通用的"零售订单经营分析"场景。听众不需要提前懂行业细节，只要理解订单、商品、门店、会员、库存这些通用概念，就能把重点放在"知识如何改变Agent表现"上。*
 
-**实操目标**：在Claude Code中使用SQLite数据库，以"无线基站性能分析"为模拟场景，通过三个递进实操直观体验三层知识模型的效果差异。
+#### 3.8.1 实操总目标：从"会查库"到"会做数据工作"
 
-| 实操 | 知识配备 | 预期效果 |
-|------|---------|---------|
-| 实操一 | 只有层面一（技术元数据） | Agent能连接数据库但频繁犯错 |
-| 实操二 | + 层面二（业务元数据） | Agent查询准确率大幅提升 |
-| 实操三 | + 层面三（分析SOP/Skill） | Agent能自主按流程分析，接近Proto-L3 |
+本实操不追求搭建复杂平台，而是用Claude Code在本地工作区快速重构一个最小可运行的数据Agent原型：
+
+1. **搭建一个小型零售数据域**：SQLite数据库 + 少量CSV种子数据，覆盖订单、商品、门店、会员、库存五类表。
+2. **重打造语义层**：按"LLM Wiki"方式，把语义层拆成两层Markdown，让Agent像查业务手册一样理解数据。
+3. **重打造Skill**：把"经营分析SOP"和"数据开发SOP"写成可被Claude Code调用的Skill，让Agent不只是生成SQL，还能按流程完成任务。
+4. **演示两类操作**：一类是简单数据查询，一类是简单数据开发，分别对应NL2SQL和DBT轨的能力差异。
+
+最终希望听众看到一个关键事实：**同一个Claude Code，同一个数据库，只有表结构时只能"猜着查"；补齐语义层和Skill后，才开始像初级数据工程师一样工作。**
+
+#### 3.8.2 Demo场景选择：零售订单经营分析
+
+选择零售场景的原因：
+
+| 维度 | 说明 |
+|------|------|
+| 通用性 | 订单、商品、门店、会员、库存是大多数人都能理解的业务对象 |
+| 指标典型 | GMV、客单价、复购率、毛利率、库存周转等指标天然需要业务口径 |
+| 易于造数 | 可以用几十到几百行模拟数据支撑完整演示 |
+| 可同时覆盖查询和开发 | 既能问"上周哪个品类增长最快"，也能让Agent开发"每日门店经营汇总表" |
+
+**建议数据表：**
+
+| 表名 | 作用 | 关键字段 |
+|------|------|---------|
+| `orders` | 订单事实表 | `order_id`, `order_date`, `store_id`, `member_id`, `sku_id`, `quantity`, `pay_amount`, `refund_amount`, `channel` |
+| `products` | 商品维表 | `sku_id`, `sku_name`, `category_l1`, `category_l2`, `list_price`, `cost_price` |
+| `stores` | 门店维表 | `store_id`, `store_name`, `city`, `region`, `store_type`, `open_date` |
+| `members` | 会员维表 | `member_id`, `join_date`, `member_level`, `city` |
+| `inventory_snapshot` | 库存快照表 | `snapshot_date`, `store_id`, `sku_id`, `on_hand_qty`, `available_qty` |
+
+**演示问题主线：**
+
+> "最近7天华东区域销售额下降了吗？如果下降，主要是哪些品类、门店和渠道造成的？请给出可复查的SQL和结论。"
+
+这个问题故意设计成不能只靠表名回答：它需要理解"销售额"口径、"最近7天"窗口、"华东"区域映射、退款是否扣减、渠道如何分组，以及下降原因的拆解路径。
+
+#### 3.8.3 项目结构：让Claude Code有地方放知识
+
+建议现场从一个空目录开始，让Claude Code生成如下结构：
+
+```text
+retail-data-agent-demo/
+├── data/
+│   ├── seed/
+│   │   ├── orders.csv
+│   │   ├── products.csv
+│   │   ├── stores.csv
+│   │   ├── members.csv
+│   │   └── inventory_snapshot.csv
+│   └── retail.db
+├── scripts/
+│   ├── init_db.py
+│   ├── run_query.py
+│   └── validate_sql.py
+├── semantic_layer/
+│   ├── index.md
+│   ├── business_wiki/
+│   │   ├── metrics.md
+│   │   ├── dimensions.md
+│   │   └── terms.md
+│   └── physical_wiki/
+│       ├── tables.md
+│       ├── columns.md
+│       └── joins.md
+├── skills/
+│   ├── retail-analysis-skill.md
+│   └── data-development-skill.md
+├── marts/
+│   └── README.md
+└── README.md
+```
+
+这里的重点不是目录本身，而是把知识分成三类：
+
+| 目录 | 对应知识 | 作用 |
+|------|---------|------|
+| `semantic_layer/physical_wiki` | 层面一：技术元数据 | 告诉Agent有哪些表、字段、连接关系 |
+| `semantic_layer/business_wiki` | 层面二：业务元数据 | 告诉Agent指标、维度、口径、术语是什么意思 |
+| `skills/` | 层面三：业务知识/SOP | 告诉Agent遇到经营分析或数据开发任务时应该按什么步骤做 |
+
+#### 3.8.4 两层Markdown语义层：按LLM Wiki方式组织
+
+这里的"LLM Wiki"不是做给人看的长篇制度文档，而是做给Agent检索和执行的知识卡片。原则是：**短、小、结构化、可引用、可更新。**
+
+**第一层：业务Wiki（Business Wiki）——回答"业务上是什么意思"**
+
+`semantic_layer/business_wiki/metrics.md`建议结构：
+
+```markdown
+# Metrics
+
+## GMV
+- 中文名：成交金额
+- 业务定义：用户实际支付的商品金额，需扣除退款金额
+- SQL口径：SUM(pay_amount - refund_amount)
+- 默认时间字段：orders.order_date
+- 可分析维度：region, city, store_type, category_l1, category_l2, channel
+- 注意事项：取消订单不进入orders；退款按订单行上的refund_amount扣减
+
+## AOV
+- 中文名：客单价
+- 业务定义：每笔订单平均成交金额
+- SQL口径：SUM(pay_amount - refund_amount) / COUNT(DISTINCT order_id)
+- 默认时间字段：orders.order_date
+```
+
+`semantic_layer/business_wiki/dimensions.md`建议结构：
+
+```markdown
+# Dimensions
+
+## region
+- 中文名：大区
+- 来源字段：stores.region
+- 常用取值：华东、华北、华南、西南
+- 过滤规则：用户说"华东区域"时，使用 stores.region = '华东'
+
+## channel
+- 中文名：销售渠道
+- 来源字段：orders.channel
+- 常用取值：门店、App、小程序、外卖平台
+- 归类规则：线上渠道 = App + 小程序 + 外卖平台
+```
+
+`semantic_layer/business_wiki/terms.md`建议结构：
+
+```markdown
+# Terms
+
+## 销售额下降
+- 判定方式：当前周期GMV低于对比周期GMV
+- 默认对比周期：上一等长周期
+- 最小输出：当前周期GMV、对比周期GMV、差额、降幅
+
+## 最近7天
+- 判定方式：以数据中最大order_date为结束日期，向前取7个自然日
+- 原因：演示数据不是实时数据，不能使用系统当天日期
+```
+
+**第二层：物理Wiki（Physical Wiki）——回答"数据上在哪里"**
+
+`semantic_layer/physical_wiki/tables.md`建议结构：
+
+```markdown
+# Tables
+
+## orders
+- 粒度：订单商品行，一笔订单购买多个商品时有多行
+- 主键：order_id + sku_id
+- 时间字段：order_date
+- 主要用途：销售、退款、渠道分析
+
+## inventory_snapshot
+- 粒度：日期 + 门店 + 商品
+- 主键：snapshot_date + store_id + sku_id
+- 时间字段：snapshot_date
+- 主要用途：库存、缺货、周转分析
+```
+
+`semantic_layer/physical_wiki/joins.md`建议结构：
+
+```markdown
+# Joins
+
+## orders -> products
+- Join Key：orders.sku_id = products.sku_id
+- Join Type：LEFT JOIN
+- 用途：补充商品品类、成本价、标价
+
+## orders -> stores
+- Join Key：orders.store_id = stores.store_id
+- Join Type：LEFT JOIN
+- 用途：补充城市、大区、门店类型
+```
+
+这两层Markdown合起来，就是最小语义层：
+
+| Wiki层 | Agent获得的能力 |
+|--------|----------------|
+| Business Wiki | 知道"GMV怎么算、华东怎么筛、下降怎么判定" |
+| Physical Wiki | 知道"该查哪张表、怎么Join、字段粒度是什么" |
+
+#### 3.8.5 Skill重打造：把SOP交给Agent
+
+语义层解决"查什么、怎么算"，Skill解决"按什么流程做"。建议现场重打造两个Skill。
+
+**Skill一：`retail-analysis-skill.md`——经营分析SOP**
+
+核心内容：
+
+```markdown
+# Retail Analysis Skill
+
+## When to use
+当用户提出销售额、品类、门店、渠道、会员、库存相关的经营分析问题时使用。
+
+## Procedure
+1. 先读取 semantic_layer/index.md，确定需要引用哪些Business Wiki和Physical Wiki。
+2. 明确分析目标、时间窗口、对比基准和核心指标。
+3. 生成第一条SQL，只回答"是否发生变化"。
+4. 如果发生下降，按品类 -> 门店 -> 渠道三个维度依次拆解贡献。
+5. 每一步都输出SQL、结果摘要和下一步判断。
+6. 最终结论必须包含：变化幅度、主要贡献因素、可复查SQL、风险提示。
+
+## Guardrails
+- 不允许直接使用字段名猜指标口径，必须引用Business Wiki中的指标定义。
+- 不允许用系统当前日期推断最近7天，必须使用数据中最大业务日期。
+- SQL执行失败时，先检查Physical Wiki，再修改SQL。
+```
+
+**Skill二：`data-development-skill.md`——数据开发SOP**
+
+核心内容：
+
+```markdown
+# Data Development Skill
+
+## When to use
+当用户要求新增汇总表、开发指标宽表、生成ETL脚本、校验数据质量时使用。
+
+## Procedure
+1. 读取业务指标定义，确认目标表粒度和字段口径。
+2. 设计目标表Schema，写入 marts/README.md。
+3. 编写可重复执行的SQL或Python脚本。
+4. 增加最小数据质量检查：主键唯一、核心指标非空、金额不为负。
+5. 运行脚本并展示样例结果。
+6. 输出开发说明：输入表、输出表、调度建议、质量规则。
+
+## Guardrails
+- 生成的派生表字段必须能追溯到语义层定义。
+- 不允许只给伪代码，必须生成可运行脚本。
+- 对金额类指标必须说明是否扣减退款。
+```
+
+重打造Skill时，要强调一个变化：**Skill不是写给人看的操作手册，而是写给Agent执行的任务协议。** 好Skill必须有触发条件、步骤、约束和验收标准。
+
+#### 3.8.6 实操流程设计：四轮递进演示
+
+| 轮次 | 时间 | 操作 | 目的 |
+|------|------|------|------|
+| 0 | 10min | 让Claude Code创建数据库、脚本和种子数据 | 准备一个可运行环境 |
+| 1 | 10min | 只给表结构，直接提问经营分析问题 | 展示"只有层面一"时的猜测和不稳定 |
+| 2 | 15min | 生成两层Markdown语义层，再提同一问题 | 展示"层面二"如何提升查询准确性 |
+| 3 | 15min | 引入经营分析Skill，让Agent按SOP拆解原因 | 展示"层面三"如何让Agent自主分析 |
+| 4 | 10min | 引入数据开发Skill，生成每日门店经营汇总表 | 展示从查询型任务扩展到数据开发任务 |
+
+**第0轮：环境初始化Prompt**
+
+```text
+请在当前目录创建一个retail-data-agent-demo项目。
+使用SQLite和Python生成一个零售订单演示数据库，包含orders、products、stores、members、inventory_snapshot五张表。
+请生成CSV种子数据、init_db.py、run_query.py，并在README.md说明如何初始化和查询。
+数据需要覆盖至少30天、4个区域、20个商品、8家门店，并刻意制造最近7天华东区域GMV下降的现象。
+```
+
+验收点：
+- `python scripts/init_db.py` 能生成 `data/retail.db`
+- `python scripts/run_query.py "SELECT COUNT(*) FROM orders"` 能返回结果
+- 数据中确实存在"最近7天华东GMV下降"的可观察现象
+
+**第1轮：无语义层查询Prompt**
+
+```text
+请分析最近7天华东区域销售额是否下降。
+如果下降，请说明主要由哪些品类、门店和渠道造成。
+```
+
+预期现象：
+- Agent可能不知道"销售额"是否要扣减退款
+- Agent可能误用系统日期，而不是数据最大日期
+- Agent可能不知道"华东"在哪张表
+- SQL可能能跑，但业务语义不稳定
+
+现场讲解点：**层面一只能让Agent"找到字段"，不能保证它"理解口径"。**
+
+**第2轮：构建两层Markdown语义层Prompt**
+
+```text
+请基于当前SQLite表结构和README，创建semantic_layer目录。
+按照LLM Wiki方式拆成两层Markdown：
+1. business_wiki：metrics.md、dimensions.md、terms.md，描述GMV、订单数、客单价、毛利额、复购会员数等指标和常用业务术语；
+2. physical_wiki：tables.md、columns.md、joins.md，描述表粒度、字段含义、主键、Join关系和默认时间字段。
+再创建semantic_layer/index.md，说明遇到不同问题时应该优先阅读哪些Wiki文件。
+要求内容短小、结构化、可被Claude Code引用。
+```
+
+然后重复同一问题：
+
+```text
+请先阅读semantic_layer/index.md，再分析最近7天华东区域销售额是否下降。
+如果下降，请说明主要由哪些品类、门店和渠道造成。所有SQL必须引用语义层中的口径。
+```
+
+验收点：
+- SQL使用 `SUM(pay_amount - refund_amount)` 计算GMV
+- 华东过滤来自 `stores.region = '华东'`
+- 最近7天基于 `MAX(order_date)` 推导
+- 输出包含当前周期、对比周期、差额、降幅
+
+现场讲解点：**语义层不是装饰文档，而是Agent生成正确SQL的约束系统。**
+
+**第3轮：引入经营分析Skill Prompt**
+
+```text
+请创建skills/retail-analysis-skill.md。
+这个Skill用于零售经营分析，要求Agent按以下流程工作：
+1. 先确认指标、时间窗口、对比基准；
+2. 再判断整体是否下降；
+3. 如果下降，按品类、门店、渠道逐层拆解贡献；
+4. 每一步都输出SQL、结果摘要、下一步判断；
+5. 最终输出结论、风险提示和可复查SQL清单。
+创建完成后，请使用该Skill重新分析最近7天华东区域销售额下降原因。
+```
+
+验收点：
+- Agent不再一次性给结论，而是分步骤执行
+- 每个步骤都能解释"为什么下一步查这个维度"
+- 结论中能区分"主要贡献因素"和"伴随现象"
+
+现场讲解点：**Skill让Agent从L2的"按问题生成SQL"，走向Proto-L3的"按SOP自主拆解任务"。**
+
+**第4轮：引入数据开发Skill Prompt**
+
+```text
+请创建skills/data-development-skill.md。
+这个Skill用于小型数据开发任务，要求Agent能设计目标表、生成脚本、运行校验并输出开发说明。
+然后请基于语义层，开发一张每日门店经营汇总表 daily_store_sales。
+字段至少包含：biz_date、store_id、store_name、region、gmv、order_count、aov、gross_profit、refund_amount。
+要求生成可重复执行的SQL或Python脚本，写入marts目录，并运行数据质量检查。
+```
+
+验收点：
+- 生成 `marts/build_daily_store_sales.sql` 或同等脚本
+- 输出表粒度清晰：日期 + 门店
+- GMV、AOV、毛利等字段遵循 `metrics.md`
+- 有最小质量检查：主键唯一、核心指标非空、金额类指标合理
+
+现场讲解点：**查询型NL2SQL已经接近可用，数据开发型任务仍需要更强的Skill、测试和人工审核。**
+
+#### 3.8.7 演示中的对比话术
+
+为了让听众直观看到三层知识的价值，建议用同一个问题做三次对比：
+
+| 状态 | Claude Code表现 | 讲解结论 |
+|------|-----------------|---------|
+| 只有数据库 | 能写SQL，但口径容易猜错 | 技术元数据只解决"能查" |
+| 加两层Markdown语义层 | SQL口径稳定，字段和Join更准确 | 业务元数据解决"查对" |
+| 再加Skill | 能按SOP拆解、迭代、产出报告 | 业务知识解决"会分析" |
+
+一句话收束：
+
+> **语义层是Agent的业务地图，Skill是Agent的工作方法。没有地图会走错路，没有方法只能原地问答。**
+
+#### 3.8.8 讲师准备清单
+
+| 准备项 | 最低要求 |
+|--------|----------|
+| Claude Code环境 | 能在本地目录读写文件、运行Python脚本 |
+| Python | 3.10+，仅依赖标准库即可完成SQLite演示 |
+| 数据规模 | 几百行即可，关键是要有可解释的业务现象 |
+| 网络依赖 | 尽量不要依赖外部API，避免现场不可控 |
+| 备份材料 | 预先准备一份完整项目压缩包，防止现场生成数据耗时 |
+
+**现场风险与兜底：**
+
+| 风险 | 兜底方式 |
+|------|---------|
+| Claude Code生成数据不稳定 | 使用预生成CSV替换 |
+| SQL第一次执行失败 | 把失败作为演示点：让Agent读取Physical Wiki后自我修复 |
+| 结论不够明显 | 在种子数据中提前放大华东下降幅度 |
+| 时间不够 | 保留第2轮和第3轮，第4轮数据开发可作为扩展演示 |
+
+#### 3.8.9 实操输出物
+
+培训结束时，应该留下四类可复用资产：
+
+1. **一个最小数据Agent项目**：`retail-data-agent-demo/`
+2. **一套两层Markdown语义层**：`business_wiki + physical_wiki`
+3. **两个可迁移Skill模板**：经营分析Skill、数据开发Skill
+4. **一组演示Prompt**：从无知识到有语义层、再到Skill驱动的完整对比链路
+
+这些输出物可以直接迁移到其他行业：把零售的指标、维度和SOP替换为政务、金融、制造、客服等领域知识，整体方法不变。
 
 ---
 
