@@ -473,22 +473,24 @@ LLM+向量检索使这些数据第一次可被规模化利用：
 
 #### 2.2.1 分层架构全景
 
-AI数据湖不是一个新产品，而是在现有湖仓之上叠加AI能力层后形成的六层架构：
+AI数据湖不是一个新产品，而是在现有湖仓之上叠加AI能力层后形成的五层架构：
 
-![AI Data Lake 6层架构](images/ai-data-lake-architecture.png)
+![AI Data Lake 分层架构](images/ai-data-lake-architecture.png)
 
 | 层次 | 传统栈（"旧楼"） | AI栈（"新层"） |
 |------|-----------|---------|
 | **应用层** | BI分析、ML训练 | 实时推理、Data Agent |
-| **处理层** | Spark（批量ETL） | Daft（多模态AI数据处理） |
-| **计算引擎层** | Spark（批量/CPU）、Flink（实时流处理） | Ray（AI任务调度/GPU） |
-| **表格式层** | Iceberg（结构化数据） | Lance（多模态AI数据） |
+| **计算引擎层** | Spark（批量ETL/CPU）、Flink（实时流处理） | Daft（多模态AI数据处理）→ 运行于 Ray（AI分布式任务调度/GPU） |
 | **统一元数据** | REST Catalog（Gravitino / Unity Catalog） | |
+| **表格式层** | Iceberg（底层存储：Parquet） | Lance（多模态AI数据格式） |
 | **存储层** | 对象存储（S3 / HDFS / GCS） | |
 
 - **左半边是"旧楼"**（Spark/Flink/Iceberg——服务人的传统栈）
 - **右半边是"新层"**（Daft/Ray/Lance——服务LLM和Agent的AI栈）
-- **中间的REST Catalog让两套栈共存于同一屋檐下**
+- **统一元数据层（REST Catalog）横跨两套栈，让两套栈共存于同一屋檐下**
+- **表格式层位于统一元数据之下**——Catalog管理的是表格式层中的Iceberg和Lance表
+- **Iceberg内部使用Parquet作为底层列式存储格式**
+- **Daft运行于Ray之上**——Daft是AI数据处理框架，Ray是其底层分布式调度引擎
 
 这张图是2.3-2.5的导航地图——接下来逐层讲解。
 
