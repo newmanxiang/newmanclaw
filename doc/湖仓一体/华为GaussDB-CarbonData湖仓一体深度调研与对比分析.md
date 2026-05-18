@@ -41,7 +41,14 @@
   - [7.2 开放表格式标准化竞争](#72-开放表格式标准化竞争)
   - [7.3 统一引擎与联邦查询的博弈](#73-统一引擎与联邦查询的博弈)
   - [7.4 华为方案的演进预判](#74-华为方案的演进预判)
-- [八、给技术决策者的建议](#八给技术决策者的建议)
+- [八、限定场景再评估：SmartCare 网络观测数据下的 CarbonData](#八限定场景再评估smartcare-网络观测数据下的-carbondata)
+  - [8.1 场景特征分析：网络观测数据的独特性](#81-场景特征分析网络观测数据的独特性)
+  - [8.2 CarbonData 在该限定场景下的优势重估](#82-carbondata-在该限定场景下的优势重估)
+  - [8.3 CarbonData 时空索引：电信网络的"杀手级特性"](#83-carbondata-时空索引电信网络的杀手级特性)
+  - [8.4 预聚合与时间序列 DataMap：内建 KPI 汇聚能力](#84-预聚合与时间序列-datamap内建-kpi-汇聚能力)
+  - [8.5 限定场景下与 Hudi/Iceberg/Parquet 的对比逆转](#85-限定场景下与-hudiicebergparquet-的对比逆转)
+  - [8.6 修正后的结论](#86-修正后的结论)
+- [九、给技术决策者的建议](#九给技术决策者的建议)
 - [附录：参考来源索引](#附录参考来源索引)
 
 ---
@@ -62,7 +69,7 @@
 ### 超出原始思考的关键发现
 
 1. **华为实际上构建了三层查询路径**：直接外表查询（最灵活但最慢）→ HetuEngine 联邦查询（中间层，带计算下推）→ 内表同步（最快但最重）；这三层可根据数据温度和业务 SLA 灵活组合
-2. **CarbonData 在华为生态中的角色正在弱化**，被 Hudi 和 Iceberg 逐步替代；CarbonData 目前主要作为 MRS 历史组件继续支持，而非湖仓一体的核心格式
+2. **CarbonData 角色需要分场景判断**（详见第八章修正分析）：在通用湖仓一体场景中确实被 Hudi/Iceberg 分流；但在 **SmartCare 网络观测数据**这类"只读 + 多维分析 + 时空查询"的限定场景下，CarbonData 的时空索引、预聚合、多级索引体系仍具有 **1-2 年内无可替代的独占优势**
 3. **HetuEngine 是华为湖仓一体的"隐藏关键组件"**，它实际上充当了湖仓之间的数据虚拟化层，通过查询下推将性能提升 5x，远非简单的"GaussDB 直接读 OBS"
 
 ---
@@ -719,7 +726,205 @@ LakeSoul 本身不包含 MPP 查询引擎，而是通过多种方式与外部引
 
 ---
 
-## 八、给技术决策者的建议
+## 八、限定场景再评估：SmartCare 网络观测数据下的 CarbonData
+
+> **场景限定条件**：华为 SmartCare 产品；网络域观测数据（KPI/MR/话单/信令等）；数据只读（Append-only，不更新）；分析模式以多维 OLAP 聚合和时空查询为主。
+
+### 8.1 场景特征分析：网络观测数据的独特性
+
+网络域观测数据与通用企业数据有本质区别，这些特征对存储格式的选择产生决定性影响：
+
+| 特征 | 网络观测数据 | 通用企业数据 |
+|------|-------------|-------------|
+| **写入模式** | Append-only，只追加不更新 | 频繁 Upsert/Delete |
+| **数据规模** | 极大（每日 14TB+/2000万用户网络，百亿级记录） | 中等到大 |
+| **更新需求** | 无——写入即不可变 | 高频更新 |
+| **查询模式** | 多维聚合（时间×区域×小区×KPI）+ 时空范围查询 | 多样化 |
+| **维度特征** | 高基数（用户号码）+ 低基数（区域/小区/KPI类型）混合 | 视业务而定 |
+| **时间属性** | 强时序性，自然按小时/天/月分层 | 弱时序性 |
+| **空间属性** | 强空间性（经纬度、网格、行政区、小区覆盖区） | 通常无空间属性 |
+| **并发特征** | 中低并发（5-20分析师）的复杂查询 | 高并发简单查询 |
+| **生命周期** | 按时间自然老化（热→温→冷→归档） | 不规律 |
+
+**关键洞察**：这个场景恰好**绕开了 CarbonData 的所有短板**（无 Upsert/事务管理需求、无 Schema 频繁演进需求），同时**命中了 CarbonData 的全部长板**（多维索引、时空索引、预聚合、列存压缩、只读 OLAP 优化）。
+
+### 8.2 CarbonData 在该限定场景下的优势重估
+
+在通用湖仓一体评估中，CarbonData 因缺乏现代湖仓能力（事务、CDC、Schema 演进、Time Travel）而被判为"角色弱化"。但在 SmartCare 网络观测数据的限定场景下，这个结论需要**显著修正**：
+
+#### 优势一：多级索引体系——为网络 KPI 多维查询量身定制
+
+CarbonData 的核心架构是"列存 + 伴随索引"，其索引体系深度远超 Parquet/ORC：
+
+```
+CarbonData 索引层级：
+
+File Level
+  └── Block Level 索引（B+树，Block 级别元数据）
+        └── Blocklet Level 索引（≤64MB，细粒度 min-max）
+              └── Page Level 索引
+                    └── Column Chunk 级索引
+
+相比之下：
+  Parquet：仅 Row Group 级 min-max 统计 + 可选 Bloom Filter
+  ORC：仅 Stripe 级统计 + 可选 Bloom Filter
+```
+
+对于网络 KPI 查询（如"查询上海浦东区域 2024年1月 所有 4G 小区的平均下行吞吐率"），CarbonData 可以在多个层级快速裁剪数据，实际读取量可降低 1-2 个数量级。
+
+#### 优势二：全局字典编码——高压缩率 + 编码上直接计算
+
+网络数据中大量低基数维度列（运营商编码、设备类型、KPI 类型、制式等），CarbonData 的全局字典编码可以：
+- 将字符串列压缩为整型编码，**压缩率 60-80%**
+- GROUP BY 和聚合操作直接在编码数据上执行，**避免字符串比较开销**
+- 仅在最终返回结果时才解码（延迟物化）
+
+#### 优势三：Sort Columns 优化——适配网络查询 pattern
+
+CarbonData 允许指定 Sort Columns，数据按此排序存储。对于网络数据，典型的 sort 配置为：
+
+```sql
+TBLPROPERTIES ('SORT_COLUMNS'='time_stamp, region_id, cell_id')
+```
+
+这使得"按时间+区域+小区"的多维查询天然获得数据局部性，极大提升了过滤效率。
+
+#### 优势四：二级索引——精确加速高基数列查询
+
+对于用户号码（MSISDN）等高基数列，CarbonData 支持创建二级索引：
+
+```sql
+CREATE INDEX idx_msisdn ON TABLE network_kpi (msisdn) AS 'carbondata'
+```
+
+这使得"查询指定用户的网络质量历史"这类点查也能高效完成，而 Parquet/ORC 在此场景需要全量扫描。
+
+### 8.3 CarbonData 时空索引：电信网络的"杀手级特性"
+
+这是 CarbonData 在网络观测领域的**独占优势**——Hudi、Iceberg、Parquet、ORC 截至 2026 年初均不具备生产可用的时空索引能力。
+
+#### 时空索引原理
+
+网络覆盖分析需要将地表按 50×50 米网格切分，按"时间+空间"二维进行查询。传统方案的痛点是：经纬度按数值排序后，空间相邻的网格在存储上被切割为不相邻的条带，导致大量随机 IO。
+
+CarbonData 通过 GeoHash/GeoSOT 空间填充曲线解决此问题：
+
+```
+传统排序：按 (latitude, longitude) 排序
+  → 空间相邻数据在存储上不相邻
+  → 区域查询需大量随机IO
+
+CarbonData 空间索引：按 GeoID (空间填充曲线编码) 排序
+  → 空间相邻数据在存储上也相邻
+  → 区域查询变为顺序IO
+```
+
+#### 空间查询语法
+
+```sql
+-- 查询多边形区域内的网络覆盖数据
+SELECT cell_id, avg(rsrp), avg(sinr) 
+FROM network_mr_data
+WHERE IN_POLYGON('116.321 39.123, 116.337 39.947, 116.560 39.935')
+  AND dt = '2024-01-15'
+GROUP BY cell_id;
+```
+
+#### 实际性能数据
+
+华为实测结果：从 2000 亿行到 1 万亿行数据，数据量增长 5x 而查询时间增长不到 1x，体现了**近似线性扩展**的时空查询能力。
+
+#### 竞品对比
+
+| 特性 | CarbonData | Iceberg | Hudi | Parquet/ORC |
+|------|-----------|---------|------|-------------|
+| 空间索引（生产就绪） | ✅ GeoHash + GeoSOT | ❌ WIP（开发中） | ❌ 不支持 | ❌ 不支持 |
+| IN_POLYGON 查询 | ✅ 原生支持 | ❌ | ❌ | ❌ |
+| 空间填充曲线排序 | ✅ 内建 | 🔶 Hilbert 排序（开发中） | ❌ | ❌ |
+| 多维组合索引 | ✅ Sort + Spatial + Secondary | 🔶 Z-order/Hilbert（分区级） | 🔶 Z-order（有限） | ❌ |
+
+**Iceberg 的地理空间支持（GEOMETRY/GEOGRAPHY 类型 + XZ2 分区变换）截至 2026 年初仍处于 WIP 状态**，依赖于尚未发布的 Parquet Java 新版本。这意味着在可预见的 1-2 年内，CarbonData 在电信时空分析场景中仍具有独占优势。
+
+### 8.4 预聚合与时间序列 DataMap：内建 KPI 汇聚能力
+
+网络观测数据的一个核心分析模式是多时间粒度的 KPI 汇聚。CarbonData 内建了 Timeseries DataMap，无需外部 ETL 工具即可完成：
+
+```sql
+-- 创建小时级预聚合
+CREATE DATAMAP agg_hour ON TABLE network_kpi
+USING "timeseries"
+DMPROPERTIES ('event_time'='collect_time', 'hour_granularity'='1')
+AS SELECT collect_time, region_id, cell_id,
+          sum(dl_traffic), avg(dl_throughput), max(user_count)
+   FROM network_kpi
+   GROUP BY collect_time, region_id, cell_id;
+
+-- 创建天级预聚合
+CREATE DATAMAP agg_day ON TABLE network_kpi
+USING "timeseries"
+DMPROPERTIES ('event_time'='collect_time', 'day_granularity'='1')
+AS SELECT collect_time, region_id,
+          sum(dl_traffic), avg(dl_throughput)
+   FROM network_kpi
+   GROUP BY collect_time, region_id;
+```
+
+**自动路由**：查询时 CarbonData 自动匹配最优预聚合表，无需修改查询 SQL。例如查询"过去 7 天各区域日均下行流量"时，自动路由到 `agg_day` 而非扫描原始明细数据。
+
+**对比**：这种内建预聚合在 Hudi/Iceberg 中不存在，需要依赖外部工具（如 StarRocks 物化视图、Spark 定时任务）来实现，增加了架构复杂度。
+
+### 8.5 限定场景下与 Hudi/Iceberg/Parquet 的对比逆转
+
+在 SmartCare 网络观测数据的限定场景下，存储格式的优劣排序与通用场景**完全逆转**：
+
+| 能力维度 | CarbonData | Hudi | Iceberg | 裸 Parquet |
+|---------|-----------|------|---------|-----------|
+| **多维 OLAP 查询（核心需求）** | ⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐ | ⭐⭐ |
+| **时空范围查询（核心需求）** | ⭐⭐⭐⭐⭐ | ⭐ | ⭐⭐（开发中） | ⭐ |
+| **KPI 时序预聚合（核心需求）** | ⭐⭐⭐⭐⭐ | ⭐ | ⭐ | ⭐ |
+| **压缩率（成本控制）** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ |
+| **只读扫描性能** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| Upsert/CDC（**不需要**） | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐ |
+| Schema 演进（**弱需求**） | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐ |
+| Time Travel（**弱需求**） | ⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐ |
+| 社区生态活跃度 | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+
+**结论**：在"只读 + 多维分析 + 时空查询"三个核心需求维度上，CarbonData 都是最优选择。Hudi/Iceberg 的核心优势（事务、CDC、Schema 演进）在此场景下完全是"过度设计"，反而引入了不必要的写放大和元数据开销。
+
+### 8.6 修正后的结论
+
+对于原报告中"CarbonData 角色弱化"的判断，在 SmartCare 网络观测数据场景下需做如下修正：
+
+#### 通用场景 vs SmartCare 场景的判断对比
+
+| 判断维度 | 通用湖仓场景（原结论） | SmartCare 网络观测场景（修正结论） |
+|---------|---------------------|-------------------------------|
+| CarbonData 竞争力 | 弱化，被 Hudi/Iceberg 替代 | **强势**，在核心需求上无可替代 |
+| 关键差异化能力 | 无明显差异化 | **时空索引 + 预聚合 + 多维索引**三重独占优势 |
+| 替代方案成熟度 | Hudi/Iceberg 成熟可用 | Iceberg 地理空间仍在开发中，**1-2年内无替代** |
+| 生态风险 | 社区活跃度下降 | 华为内部持续维护（SmartCare/MRS 为核心营收产品），**短期无风险** |
+| 建议策略 | 制定迁移路线图 | **继续使用 CarbonData**，但关注 Iceberg 地理空间功能进展 |
+
+#### 需要关注的长期风险
+
+尽管在当前场景下 CarbonData 仍是最优选择，但以下长期风险不应忽视：
+
+1. **社区维度**：Apache CarbonData 的社区贡献者主要来自华为，外部贡献极少。一旦华为内部战略调整，项目可能缺乏持续演进动力
+2. **生态兼容性**：随着 Iceberg 在全行业的标准化，越来越多的工具和引擎（Spark、Flink、Trino、StarRocks）都在优化 Iceberg 路径。CarbonData 的引擎集成广度有限（主要限于 Spark 和 Presto）
+3. **Iceberg 追赶**：Iceberg 的 Geospatial 支持一旦 GA，将迅速缩小与 CarbonData 的差距。Iceberg 的 Hilbert 排序 + XZ2 分区变换在理论能力上与 GeoHash/GeoSOT 等价
+4. **查询引擎耦合**：CarbonData 深度绑定 Spark 生态，而 SmartCare 未来如果需要引入更高性能的 MPP 引擎（如 StarRocks/Doris），CarbonData 的集成支持可能成为瓶颈
+
+#### 推荐策略
+
+**当前（2026-2027）**：在 SmartCare 场景中继续使用 CarbonData，充分利用其时空索引和预聚合能力。
+
+**中期（2027-2028）**：关注 Iceberg Geospatial GA 进展。一旦 Iceberg 地理空间功能达到生产就绪，评估迁移的可行性和收益。
+
+**长期准备**：设计数据层的抽象接口，使上层应用不直接耦合 CarbonData API，为未来可能的格式迁移预留灵活性。
+
+---
+
+## 九、给技术决策者的建议
 
 ### 场景化选型指南
 
@@ -812,7 +1017,28 @@ LakeSoul 本身不包含 MPP 查询引擎，而是通过多种方式与外部引
 | [L7] | 使用 Presto 查询 LakeSoul 表 | https://lakesoul-io.github.io/zh-Hans/docs/Usage%20Docs/setup-presto |
 | [L8] | 使用 Doris 和 LakeSoul | https://doris.apache.org/zh-CN/docs/3.x/lakehouse/best-practices/doris-lakesoul/ |
 
-### D. 行业分析与趋势
+### D. CarbonData 电信/时空分析专题
+
+| 编号 | 来源 | 地址 |
+|------|------|------|
+| [C1] | 基于CarbonData的电信时空大数据探索（InfoQ） | https://xie.infoq.cn/article/7f6c4cb8f1b2193a10e16a353 |
+| [C2] | CarbonData 空间索引文档（MRS 官方） | https://support.huaweicloud.com/intl/zh-cn/ae-ad-1-cmpntguide-mrs/mrs_01_1451.html |
+| [C3] | CarbonData 空间索引指南（Apache 官方） | https://carbondata.apache.org/spatial-index-guide.html |
+| [C4] | CarbonData 预聚合 DataMap 指南 | https://carbondata.apache.org/preaggregate-datamap-guide.html |
+| [C5] | CarbonData 时间序列 DataMap 指南 | https://carbondata.apache.org/timeseries-datamap-guide.html |
+| [C6] | CarbonData+Spark SQL 应用实践与调优（InfoQ） | https://www.infoq.cn/article/2017/09/carbondata-spark-huawei |
+| [C7] | 单表千亿电信大数据场景：Spark+CarbonData 替换 Impala 案例 | https://www.ancii.com/aywq5zgve/ |
+| [C8] | Apache CarbonData 2.0 预览（华为云社区） | https://bbs.huaweicloud.cn/blogs/163408 |
+| [C9] | CarbonData 性能分析（亿速云） | http://www.yisu.com/jc/276576.html |
+| [C10] | CarbonData 深度解析（博客园） | https://www.cnblogs.com/happenlee/p/9202236.html |
+| [C11] | CarbonData 初探（Hexiaoqiao） | http://hexiaoqiao.github.io/blog/2016/10/01/carbondata-column-based-storage-format/ |
+| [C12] | Apache Iceberg Geospatial 支持（Issue #10260） | https://github.com/apache/iceberg/issues/10260 |
+| [C13] | Parquet GEOMETRY/GEOGRAPHY 类型（PR #240） | https://github.com/apache/parquet-format/pull/240 |
+| [C14] | 华为 SmartCare 解决方案（C114） | https://m.c114.com.cn/w126-644729.html |
+| [C15] | FusionInsight 大数据平台（华为出版物） | https://www.huawei.com/en/huaweitech/publication/77/big-results-from-big-data |
+| [C16] | CarbonData 成为 Apache 顶级项目（华为新闻） | https://www.huawei.com/en/news/2017/4/Huawei-CarbonData-Program |
+
+### E. 行业分析与趋势
 
 | 编号 | 来源 | 地址 |
 |------|------|------|
