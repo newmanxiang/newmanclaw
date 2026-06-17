@@ -2,7 +2,8 @@
 
 > **主题**：电信运维（XDR 详单 + 统计数据）大数据平台从"自研存储/查询 + 大规模 MPP"向"Iceberg + StarRocks 湖内存算"演进的技术可行性、与华为 SEQ 架构的优劣势对比、以及分阶段演进策略。
 > **更新日期**：2026 年 6 月
-> **配套阅读**：同目录 [`CarbonData-HetuEngine_对比_Iceberg-StarRocks深度分析.md`](./CarbonData-HetuEngine_对比_Iceberg-StarRocks深度分析.md)（存储格式/查询效率/加速方式三维度机制对比）、[`华为GaussDB-CarbonData湖仓一体深度调研与对比分析.md`](./华为GaussDB-CarbonData湖仓一体深度调研与对比分析.md)（华为湖仓体系调研）
+> **说明**：本文已融合 **CarbonData + HetuEngine 与 Iceberg + StarRocks 的原理级对比**（存储格式 / 查询效率 / 加速方式三维度机制，见第四章），作为可行性与策略分析的理论基础。
+> **配套阅读**：同目录 [`CarbonData-HetuEngine_对比_Iceberg-StarRocks深度分析.md`](./CarbonData-HetuEngine_对比_Iceberg-StarRocks深度分析.md)（机制对比的完整版）、[`华为GaussDB-CarbonData湖仓一体深度调研与对比分析.md`](./华为GaussDB-CarbonData湖仓一体深度调研与对比分析.md)（华为湖仓体系调研）
 
 ---
 
@@ -14,21 +15,27 @@
   - [2.2 我司现状：HBase 索引 + 自研 HDFS 格式 + 自研查询 + 大规模 MPP](#22-我司现状hbase-索引--自研-hdfs-格式--自研查询--大规模-mpp)
   - [2.3 目标架构：Iceberg + StarRocks（湖内存算）](#23-目标架构iceberg--starrocks湖内存算)
 - [三、现状架构的根因剖析与副作用](#三现状架构的根因剖析与副作用)
-- [四、目标架构（Iceberg + StarRocks）技术可行性分析](#四目标架构iceberg--starrocks技术可行性分析)
-  - [4.1 总体可行性判断](#41-总体可行性判断)
-  - [4.2 统计数据场景：可行性高](#42-统计数据场景可行性高)
-  - [4.3 XDR 详单场景：可行性中，点查是最大技术风险](#43-xdr-详单场景可行性中点查是最大技术风险)
-  - [4.4 组件级迁移映射与可行性](#44-组件级迁移映射与可行性)
-- [五、与华为 SEQ 的优劣势对比](#五与华为-seq-的优劣势对比)
-  - [5.1 逐维度对比](#51-逐维度对比)
-  - [5.2 目标架构相对 SEQ 的优势](#52-目标架构相对-seq-的优势)
-  - [5.3 目标架构相对 SEQ 的劣势/风险](#53-目标架构相对-seq-的劣势风险)
-- [六、下一步演进策略](#六下一步演进策略)
-  - [6.1 演进总原则](#61-演进总原则)
-  - [6.2 分阶段路线图](#62-分阶段路线图)
-  - [6.3 关键技术难点与对策](#63-关键技术难点与对策)
-  - [6.4 风险登记与回退预案](#64-风险登记与回退预案)
-- [七、结论与建议](#七结论与建议)
+- [四、两条路线的原理对比（存储格式、查询效率、加速方式）](#四两条路线的原理对比存储格式查询效率加速方式)
+  - [4.1 设计哲学：加速沉到存储 vs 沉到引擎](#41-设计哲学加速沉到存储-vs-沉到引擎)
+  - [4.2 维度一：存储格式（CarbonData vs Iceberg）](#42-维度一存储格式carbondata-vs-iceberg)
+  - [4.3 维度二：查询效率（HetuEngine vs StarRocks）](#43-维度二查询效率hetuengine-vs-starrocks)
+  - [4.4 维度三：加速方式](#44-维度三加速方式)
+  - [4.5 原理小结与对电信运维场景的启示](#45-原理小结与对电信运维场景的启示)
+- [五、目标架构（Iceberg + StarRocks）技术可行性分析](#五目标架构iceberg--starrocks技术可行性分析)
+  - [5.1 总体可行性判断](#51-总体可行性判断)
+  - [5.2 统计数据场景：可行性高](#52-统计数据场景可行性高)
+  - [5.3 XDR 详单场景：可行性中，点查是最大技术风险](#53-xdr-详单场景可行性中点查是最大技术风险)
+  - [5.4 组件级迁移映射与可行性](#54-组件级迁移映射与可行性)
+- [六、与华为 SEQ 的优劣势对比](#六与华为-seq-的优劣势对比)
+  - [6.1 逐维度对比](#61-逐维度对比)
+  - [6.2 目标架构相对 SEQ 的优势](#62-目标架构相对-seq-的优势)
+  - [6.3 目标架构相对 SEQ 的劣势/风险](#63-目标架构相对-seq-的劣势风险)
+- [七、下一步演进策略](#七下一步演进策略)
+  - [7.1 演进总原则](#71-演进总原则)
+  - [7.2 分阶段路线图](#72-分阶段路线图)
+  - [7.3 关键技术难点与对策](#73-关键技术难点与对策)
+  - [7.4 风险登记与回退预案](#74-风险登记与回退预案)
+- [八、结论与建议](#八结论与建议)
 - [附录：参考来源索引](#附录参考来源索引)
 
 ---
@@ -184,9 +191,171 @@
 
 ---
 
-## 四、目标架构（Iceberg + StarRocks）技术可行性分析
+## 四、两条路线的原理对比（存储格式、查询效率、加速方式）
 
-### 4.1 总体可行性判断
+> 本章把 SEQ 采用的 **CarbonData + HetuEngine** 与目标 **Iceberg + StarRocks** 抽象为两条技术路线，从**存储格式、查询效率、加速方式**三个维度做机制级（原理）对比。它是后续"技术可行性（第五章）""与 SEQ 优劣势（第六章）""演进策略（第七章）"的理论基础。
+
+### 4.1 设计哲学：加速沉到存储 vs 沉到引擎
+
+两条路线最根本的差异，是**把加速能力放在哪一层**。
+
+| 视角 | CarbonData + HetuEngine（SEQ 路线） | Iceberg + StarRocks（目标路线） |
+|------|----------------------------------|------------------------------|
+| **设计哲学** | 重存储：把加速能力内建进文件格式 | 重引擎：表格式只管"表的元数据与事务"，加速交给引擎 |
+| **格式角色** | 文件格式 + 表语义 + 索引 三合一 | 表格式（元数据层）与文件格式（Parquet/ORC）解耦 |
+| **引擎角色** | 联邦虚拟化（JVM，Trino/Presto 系） | 极速向量化 MPP（C++，自研内核 + 外表挂载） |
+| **加速位置** | 存储格式内建（索引/字典/预聚合） | 计算引擎承担（缓存/物化视图/向量化） |
+| **耦合度** | 格式与引擎强耦合（CarbonData 主要被 Spark/Hetu 读） | 松耦合（Iceberg 被几乎所有引擎读写） |
+| **开放性** | 私有格式，生态收窄 | 开放标准，生态最广 |
+| **加速演进** | 受 CarbonData 社区活跃度限制（较慢） | 随 StarRocks 引擎版本快速迭代（快） |
+
+**一句话**：CarbonData 把加速"打进文件里"，一次写入随数据移动、跨引擎复用，对只读/多维/时空场景近乎开箱即用，但格式重、写入慢、演进受限、社区弱；Iceberg 把表格式做薄、保持开放，加速交给 StarRocks 承担，更易随引擎升级持续增强、且数据可被多引擎共享，代价是加速效果依赖具体引擎。
+
+### 4.2 维度一：存储格式（CarbonData vs Iceberg）
+
+#### CarbonData：列存文件格式 + 重型内建索引
+
+CarbonData 是"一个文件格式同时承担文件编码、索引、表语义、预聚合"四重职责的私有列存格式。
+
+- **多级索引**：物理布局 `Segment → CarbonData File → Blocklet(≤64MB) → Page`，配合独立 `.carbonindex` 维护 Block/Blocklet/Page **多级 min/max 索引**；相比 Parquet 仅 RowGroup 级、ORC 仅 Stripe 级统计，裁剪粒度更细，高选择性查询实际读取量常降 1–2 个数量级。
+- **全局字典编码 + 延迟物化**：低基数列编码为整型，压缩率约 60%–80%，GROUP BY/聚合直接在编码上执行、仅最终解码。
+- **Sort Columns 聚簇**：按业务查询模式排序落盘，强化 min/max 裁剪。
+- **二级索引**：对高基数列（如 MSISDN）建辅助索引，支持**高基数点查**，避免全扫。
+- **时空索引**：基于 GeoHash/GeoSOT 空间填充曲线，把空间相邻数据排布相邻，原生支持 `IN_POLYGON`（Iceberg/Parquet 截至 2026 初仍不具备生产可用能力）。
+- **内建预聚合（Timeseries/Pre-agg DataMap）**：把"指标层/汇聚表"内建进格式，查询自动路由到最优预聚合（SQL 零改造）。
+- **短板**：事务/并发弱（以 Segment 批次管理，IUD 能力有限、写放大大）、Schema 演进有限、基本无 Time Travel、生态收窄（主要绑定 Spark/Hetu）。
+
+#### Iceberg：表格式（Table Format）+ Parquet/ORC 数据文件
+
+Iceberg 把"表是什么"抽象为一层独立元数据，数据文件本身仍是标准 Parquet/ORC/Avro。
+
+- **三层元数据**：`metadata.json → manifest list → manifest（含每个数据文件的分区值与列级 min/max/null/记录数）→ data/delete file`；查询可只读清单完成**文件级裁剪**，避免对象存储昂贵的 LIST。
+- **隐藏分区**：通过分区变换（`days/bucket/truncate/...`）在元数据层维护分区，查询无需显式分区谓词即可裁剪，且支持分区演进而不重写历史。
+- **Schema 演进**：基于列 ID（field-id），支持加/删/改名/重排/类型提升，历史数据不重写。
+- **快照 / Time Travel / ACID**：每次写入生成新 snapshot，读写隔离，支持时间回溯与回滚，乐观并发提交。
+- **行级更新**：Copy-on-Write（读快写慢）/ Merge-on-Read（写快读时合并 delete file）。
+- **统计**：Puffin 文件存列级 NDV 等统计供 CBO；数据文件级有 Parquet/ORC 的 RowGroup/Stripe 统计 + 字典 + 可选 Bloom Filter。
+- **短板**：**无内建细粒度/二级/时空索引、无内建预聚合**（裁剪靠 manifest + 文件级统计，粒度粗于 CarbonData；预聚合需引擎物化视图）；高频写入产生小文件与元数据膨胀，需 Compaction / expire snapshots / rewrite manifests 维护。
+
+#### 存储格式维度对比表
+
+| 能力 | CarbonData | Iceberg（+ Parquet/ORC） |
+|------|-----------|--------------------------|
+| **本质** | 文件格式 + 索引 + 表语义 三合一 | 表格式（元数据层），数据文件用 Parquet/ORC |
+| **索引粒度** | Block/Blocklet/Page 多级（细） | manifest 文件级 + RowGroup/Stripe 级（较粗） |
+| **二级索引（高基数点查）** | ✅ | ❌（依赖文件统计 + 可选 Bloom Filter） |
+| **时空索引** | ✅ GeoHash/GeoSOT + `IN_POLYGON` | ❌（WIP，2026 初未 GA） |
+| **内建预聚合** | ✅ DataMap（自动路由） | ❌（需引擎物化视图） |
+| **Schema 演进** | 有限 | ✅ 基于 field-id，历史不重写 |
+| **分区** | 静态分区 + Sort Columns | ✅ 隐藏分区 + 分区变换 + 分区演进 |
+| **快照 / Time Travel / ACID** | ❌/弱（Segment 批次） | ✅ snapshot 隔离 + 回溯 + 乐观并发 |
+| **行级更新** | 弱（IUD，写放大大） | ✅ COW / MOR |
+| **统计信息** | 内建多级 min/max | ✅ manifest 列级统计 + Puffin（NDV） |
+| **跨引擎开放性** | 弱（Spark/Hetu 为主） | ✅ 极广（Spark/Flink/Trino/StarRocks/...） |
+| **适配负载** | 只读 / 多维 OLAP / 时空 / 高基数点查 | 通用湖仓 / 演进频繁 / 事务更新 / 跨引擎共享 |
+
+### 4.3 维度二：查询效率（HetuEngine vs StarRocks）
+
+#### HetuEngine 查询 CarbonData 的执行链路
+
+```
+SQL → HetuEngine Coordinator（解析/优化/分片，谓词/投影/聚合下推）
+        → HetuEngine Worker（JVM 分布式执行）
+              → CarbonData Connector 读取
+                    → Block/Blocklet/Page 索引裁剪 + 字典上聚合 + 延迟物化
+                          → HDFS/OBS
+```
+
+- **裁剪靠存储格式**：Hetu 把谓词推给 CarbonData，由其多级/二级/时空索引完成裁剪——越命中索引列，扫描量下降越显著。
+- **JVM 执行**：源自 Trino/Presto，向量化程度低于原生 C++ 引擎；但分布式 pipeline、计算下推、CTE/元数据缓存成熟。
+- **联邦是亮点**：可跨源关联（CarbonData ⨝ Hive/HBase/GaussDB），代价是联邦性能上限低于单引擎本地执行。
+- **典型增益**：CarbonData 相比原生 SparkSQL 约 10x（格式贡献）；Hetu 跨源下推相比开源约 5x（引擎贡献）。
+
+#### StarRocks 查询 Iceberg 的执行链路
+
+```
+SQL → StarRocks FE（解析/CBO（用 manifest+Puffin 统计）/物化视图重写/调度，文件级裁剪）
+        → StarRocks BE/CN（C++ 全向量化 MPP + SIMD）
+              → Data Cache（内存 L1 → NVMe L2）命中则本地读
+                    → miss：Iceberg 数据文件（Parquet/ORC，RowGroup/Stripe 裁剪 + 列裁剪）
+                          → HDFS/S3/OSS
+```
+
+- **C++ 全向量化 + CBO**：列式内存 + SIMD，交互式延迟与 CPU 效率优于 JVM；FE 用 Iceberg manifest/Puffin 统计做代价优化。
+- **本地 Data Cache**：把远程文件块缓存到本地内存/NVMe，命中时接近内表性能，弥补存算分离 IO 短板。
+- **物化视图查询重写**：异步 MV 对 Iceberg 表预计算，查询自动重写命中（等价"引擎侧预聚合"）。
+- **外表零导入**：External Catalog 直读 Iceberg，无需 ETL 入库；冷查询（缓存未命中）受对象存储带宽/延迟限制。
+- **典型增益**：行业实践中 StarRocks 查询湖表性能可达 SparkSQL 的 3–8x。
+
+#### 查询效率维度对比表
+
+| 维度 | HetuEngine + CarbonData | StarRocks + Iceberg |
+|------|------------------------|---------------------|
+| **执行内核** | JVM，Trino/Presto 系 | C++ 全向量化 MPP + SIMD |
+| **数据裁剪主力** | CarbonData 多级/二级/时空索引（细） | Iceberg manifest + 文件级统计（较粗） |
+| **本地数据块缓存** | 弱（以 CTE/元数据缓存为主） | ✅ Data Cache（内存 + NVMe，默认开启，SLRU） |
+| **交互式低延迟 / 高并发** | 中 | **高**（向量化 + 缓存 + MV 重写） |
+| **多维 / 时空 / 高基数点查** | **强**（格式内建索引/预聚合） | 中（无内建二级/时空索引，靠扫描 + MV 弥补） |
+| **跨源联邦关联** | **强**（Hetu 原生） | 中（JDBC/多 Catalog） |
+| **更新表 / Schema 演进表分析** | 弱 | 高（Iceberg MOR + field-id 演进） |
+
+#### 典型负载下的效率画像
+
+| 查询负载 | HetuEngine + CarbonData | StarRocks + Iceberg | 更优 |
+|---------|------------------------|---------------------|------|
+| 交互式 BI 仪表盘（亚秒级） | 中 | 高 | **B** |
+| 多维 OLAP 聚合 | 高（Sort + 多级索引 + 预聚合） | 高（向量化 + MV，无内建预聚合） | A≈B |
+| 时空 / 多边形查询 | **高**（时空索引） | 低—中（无时空索引） | **A** |
+| 高基数点查（按用户/ID） | 中—高（二级索引） | 中（无二级索引，靠文件统计/Bloom） | **A** |
+| 跨源关联（湖 ⨝ 业务库） | **高**（Hetu 联邦） | 中 | **A** |
+| 频繁更新 / CDC 表分析 | 低（IUD 弱） | 高（MOR + 读合并） | **B** |
+| Schema 频繁演进的表 | 低 | 高（field-id 演进） | **B** |
+
+> 注：上表中 A = CarbonData + HetuEngine，B = Iceberg + StarRocks。
+
+### 4.4 维度三：加速方式
+
+两条路线的加速哲学根本不同：**A 把加速"沉到存储格式"，B 把加速"沉到计算引擎"。**
+
+#### A（CarbonData + HetuEngine）的加速手段
+
+- **存储格式侧（主力）**：① 多级索引裁剪（Block/Blocklet/Page）；② 全局字典编码 + 延迟物化；③ Sort Columns 聚簇；④ 二级索引（高基数点查）；⑤ 时空索引（GeoHash/GeoSOT，`IN_POLYGON`）；⑥ Timeseries/Pre-agg DataMap 内建预聚合（自动路由）。
+- **计算引擎侧（辅助）**：⑦ 计算下推（谓词/投影/聚合/子查询，复用源端索引）；⑧ CTE 缓存；⑨ 元数据缓存；⑩ 物化视图（能力弱于 StarRocks 的查询重写体系）。
+
+#### B（Iceberg + StarRocks）的加速手段
+
+- **计算引擎侧（主力）**：① Data Cache（1MB Block 为单元，内存 L1 + NVMe L2，v3.3 默认开启，SLRU 防污染）；② 缓存预热 `CACHE SELECT`；③ 自适应缓存填充（v3.3.2+）；④ 一致性哈希 Scan Range 调度（最大化命中）+ 增量 Scan Range 部署；⑤ 异步物化视图 + 透明查询重写（分区级增量刷新）；⑥ 全向量化执行 + CBO。
+- **存储格式侧（辅助）**：⑦ manifest 文件级裁剪；⑧ 隐藏分区裁剪；⑨ Puffin 统计（NDV）供 CBO；⑩ Parquet/ORC 的 RowGroup/Stripe 裁剪、列裁剪、字典、可选 Bloom Filter；⑪ Compaction / 排序写入（含 Z-order/Hilbert 聚簇，引擎侧）提升后续裁剪率。
+
+#### 加速方式维度对比表
+
+| 加速手段 | A：CarbonData + HetuEngine | B：Iceberg + StarRocks |
+|---------|----------------------------|------------------------|
+| **加速重心** | 存储格式（索引/字典/预聚合内建） | 计算引擎（缓存/物化视图/向量化） |
+| **数据块缓存** | 弱 | ✅ Data Cache（内存+NVMe，默认开启） |
+| **缓存预热** | ❌ | ✅ CACHE SELECT |
+| **细粒度 / 二级 / 时空索引** | ✅（多级 + 二级 + 时空） | ❌（文件级统计 + 可选 Bloom） |
+| **内建预聚合** | ✅ DataMap（自动路由） | ❌（用引擎物化视图替代） |
+| **物化视图 + 查询重写** | 一般（Hetu MV） | ✅ 异步 MV + 透明重写 + 增量刷新 |
+| **计算/谓词下推** | ✅ Hetu 下推 + 格式索引过滤 | ✅ 谓词/分区/列裁剪下推到文件层 |
+| **CBO 统计** | CarbonData 元数据 | ✅ manifest 统计 + Puffin NDV |
+| **加速随版本演进** | 受 CarbonData 社区限制（慢） | ✅ 随 StarRocks 迭代（快） |
+| **加速可移植性** | 高（随数据/格式走，跨引擎复用） | 中（核心加速绑定 StarRocks，元数据通用） |
+
+### 4.5 原理小结与对电信运维场景的启示
+
+1. **加速放在哪一层决定一切**：A 的加速"开箱即用、随数据走"，B 的加速"随引擎演进、保持开放"。这一原理差异是后续所有优劣势的根源。
+2. **统计数据（多维 + 高并发）→ B 的主场**：多维聚合靠向量化 + Data Cache + 物化视图，正是 StarRocks 的强项；预聚合用异步 MV 替代 CarbonData DataMap 即可。
+3. **XDR 详单（数十亿高基数点查）→ A 的强项、B 的软肋**：A 靠 CarbonData 二级索引"内建"点查能力；B 因 Iceberg 无原生二级索引，文件级 min/max 对高基数随机值几乎无裁剪，必须**工程化补齐**（详见第五章 5.3）。
+4. **时空分析 → A 独占**：CarbonData 时空索引在 1–2 年内仍无生产级替代；B 需分区/聚簇近似或外部方案。
+
+> 因此，本文的可行性分析（第五章）、与 SEQ 的优劣势（第六章）、演进策略（第七章），本质都是把上述原理差异**落到电信运维的具体数据特征（Append-only + 数十亿 XDR 点查/多维）**上展开。
+
+---
+
+## 五、目标架构（Iceberg + StarRocks）技术可行性分析
+
+### 5.1 总体可行性判断
 
 | 子场景 | 可行性 | 关键依据 | 主要风险 |
 |--------|-------|---------|---------|
@@ -196,7 +365,7 @@
 | **湖仓统一/资源复用** | **高** | 单一 Iceberg 存储 + StarRocks 统一算力 + 资源组隔离 | 低 |
 | **实时写入/实时查询** | **中—高** | StarRocks 主键表 + 实时导入对标 GaussDB | 中（高吞吐实时写入调优） |
 
-### 4.2 统计数据场景：可行性高
+### 5.2 统计数据场景：可行性高
 
 统计数据的诉求（多维过滤聚合 + 高并发 + 低延迟）几乎是 StarRocks 的"定义场景"：
 
@@ -207,9 +376,9 @@
 
 > 结论：统计场景迁移**风险低、收益大**，应作为第一优先级，可优先解除"资源隔离 + 存储过程绑定"两大副作用。
 
-### 4.3 XDR 详单场景：可行性中，点查是最大技术风险
+### 5.3 XDR 详单场景：可行性中，点查是最大技术风险
 
-这是整个迁移的技术分水岭。详单的核心查询是**数十亿行中按高基数键（IMSI/MSISDN/会话 ID）点查明细**，而：
+这是整个迁移的技术分水岭。详单的核心查询是**数十亿行中按高基数键（IMSI/MSISDN/会话 ID）点查明细**，而（呼应第四章原理）：
 
 - **现状**：HBase 索引天然适合高基数点查（按 rowkey/二级索引毫秒级定位）。
 - **SEQ**：CarbonData 自带**二级索引**，点查"开箱即用"。
@@ -226,12 +395,12 @@
 
 > 现实建议：**A（热冷分层）为主 + B（排序+Bloom）为辅**，对极端冷数据随机点查保留 **C** 作为兜底。切忌假设"详单全量进 Iceberg 外表即可满足点查"——这是最大可行性陷阱。
 
-### 4.4 组件级迁移映射与可行性
+### 5.4 组件级迁移映射与可行性
 
 | 现状组件 | 目标组件 | 迁移可行性 | 说明 |
 |---------|---------|-----------|------|
 | 自研 HDFS 文件格式 | **Iceberg + Parquet/ORC** | 高 | 标准化、跨引擎，去自研维护负担；需数据格式转换/回灌 |
-| HBase 详单索引 | **StarRocks 内表索引（热）+ Iceberg 排序/Bloom（冷）/(可选)外置 KV** | 中 | 高基数点查需重点设计（见 4.3） |
+| HBase 详单索引 | **StarRocks 内表索引（热）+ Iceberg 排序/Bloom（冷）/(可选)外置 KV** | 中 | 高基数点查需重点设计（见 5.3） |
 | 自研查询组件（仅点查） | **StarRocks SQL** | 高 | 统一 SQL 入口，且天然支持多维查询（补齐现状短板） |
 | 统计 MPP 集群（存储+计算） | **Iceberg 存储 + StarRocks 计算** | 高 | 多维/高并发由 StarRocks 承担 |
 | MPP 存储过程 | **StarRocks 异步物化视图 + SQL 作业** | 中—高 | 逻辑改写工作量大，但可声明式化、可维护 |
@@ -239,9 +408,11 @@
 
 ---
 
-## 五、与华为 SEQ 的优劣势对比
+## 六、与华为 SEQ 的优劣势对比
 
-### 5.1 逐维度对比
+> 本章是第四章机制对比在 **SEQ 产品语境**下的应用结论：把"CarbonData + HetuEngine"具体化为华为 SEQ（含 GaussDB 实时补充），与目标架构对照（机制原理详见第四章）。
+
+### 6.1 逐维度对比
 
 | 维度 | 华为 SEQ（CarbonData+Spark+Hetu+GaussDB） | 目标架构（Iceberg+StarRocks） | 占优 |
 |------|----------------------------------------|------------------------------|------|
@@ -258,7 +429,7 @@
 | **生态/演进速度** | CarbonData 社区弱化 | Iceberg/StarRocks 社区活跃、迭代快 | **目标** |
 | **运维/人才** | 依赖华为体系 | 开源技能市场广 | **目标** |
 
-### 5.2 目标架构相对 SEQ 的优势
+### 6.2 目标架构相对 SEQ 的优势
 
 1. **不锁定、开放标准**：Iceberg 被 Spark/Flink/Trino/StarRocks/Snowflake 等广泛支持，数据可被多引擎共享，规避私有格式（CarbonData）锁定与社区弱化风险。
 2. **多维 + 高并发查询更强**：StarRocks C++ 全向量化 + Data Cache + 物化视图重写，在统计数据的交互式多维分析上普遍优于 Spark/Hetu（JVM）。
@@ -266,7 +437,7 @@
 4. **湖仓真正统一**：详单与统计共用一份 Iceberg 存储 + 一套 StarRocks 算力，**资源弹性复用**，根治"两套存储 + 两套算力"的割裂。
 5. **演进速度快**：加速能力沉在引擎，随 StarRocks 版本（Data Cache/MV/CBO/索引）持续增强，不受单一私有格式社区进度制约。
 
-### 5.3 目标架构相对 SEQ 的劣势/风险
+### 6.3 目标架构相对 SEQ 的劣势/风险
 
 1. **详单点查能力需自建**：SEQ 靠 CarbonData 二级索引"白嫖"点查能力，目标架构必须工程化补齐（热冷分层/排序+Bloom/外置索引），这是**最大劣势与风险**。
 2. **无原生时空索引**：若有网络覆盖/网格/`IN_POLYGON` 类时空分析，CarbonData 仍独占优势；Iceberg 地理空间能力 2026 初未 GA，需用分区/聚簇近似或外部方案。
@@ -278,22 +449,22 @@
 
 ---
 
-## 六、下一步演进策略
+## 七、下一步演进策略
 
-### 6.1 演进总原则
+### 7.1 演进总原则
 
 1. **先易后难、先统计后详单**：统计场景迁移风险低、收益大，先做；详单点查是硬骨头，留待方案验证充分后再动。
 2. **可行性先于全量迁移**：每阶段先 PoC + 基线对比（与现状/SEQ 同口径压测），用数据决策，再扩面。
 3. **新老并行、灰度切换、可回退**：迁移期双写/双查对账，保留回退能力，杜绝"一刀切"。
 4. **抽象存储访问层**：上层应用不直接耦合具体格式/引擎 API，为未来演进（Iceberg 索引 GA、引擎替换）预留弹性。
 
-### 6.2 分阶段路线图
+### 7.2 分阶段路线图
 
 #### 阶段 0：评估与 PoC（地基）
 
 - 建立 **基线压测口径**：详单点查（命中率/延迟/扫描量）、统计多维（并发/延迟/资源）、写入吞吐，分别对现状 MPP / 自研组件取基线。
 - 搭建 Iceberg + StarRocks 试验环境，跑通：Iceberg 外表查询、Data Cache、异步物化视图、StarRocks 内表索引、实时导入。
-- **重点验证详单点查方案**（4.3 的 A/B/C），用真实数据规模量化"点查退化"风险与补齐效果。
+- **重点验证详单点查方案**（5.3 的 A/B/C），用真实数据规模量化"点查退化"风险与补齐效果。
 
 #### 阶段 1：统计数据先行迁移（速赢，解两大副作用）
 
@@ -323,7 +494,7 @@
 | 2 | 详单入湖 | 点查退化 | 点查 SLA 达标 + 自研组件可替换 |
 | 3 | 统一下线 | 实时/运维短板 | MPP + 自研格式安全下线 |
 
-### 6.3 关键技术难点与对策
+### 7.3 关键技术难点与对策
 
 | 难点 | 风险 | 对策 |
 |------|------|------|
@@ -335,7 +506,7 @@
 | **时空分析缺失** | 中（若有需求） | 分区/聚簇近似 + 外部时空方案；跟踪 Iceberg Geospatial GA |
 | **迁移期一致性** | 中 | 双写双查对账 + 灰度 + 可回退 |
 
-### 6.4 风险登记与回退预案
+### 7.4 风险登记与回退预案
 
 - **R1 详单点查不达标**：阶段 2 退出条件未满足时，详单维持现状（HBase+自研），仅统计迁移先收益；待 Iceberg 索引或方案成熟再推进。
 - **R2 物化视图无法覆盖复杂加工**：保留少量 MPP/Spark 作业承接，分批改写，不强迁。
@@ -344,10 +515,10 @@
 
 ---
 
-## 七、结论与建议
+## 八、结论与建议
 
 1. **方向正确**：把存储与计算重心搬回湖中、用 **Iceberg + StarRocks** 开放栈替代自研格式/查询与独立 MPP，符合行业趋势，也与华为 SEQ 的"湖内存算"理念一致，且在**开放性、多维查询、计算解耦、资源复用**上优于现状与 SEQ。
-2. **成败在详单点查**：整个迁移最大的技术风险是 **XDR 详单高基数点查在 Iceberg+StarRocks 上的裁剪能力**——这是 SEQ 靠 CarbonData 二级索引"内建"而目标架构必须"工程化补齐"的能力差。务必在 PoC 阶段用真实规模数据量化验证 **热冷分层 + 排序/Bloom + (兜底)外置索引** 的效果。
+2. **成败在详单点查**：整个迁移最大的技术风险是 **XDR 详单高基数点查在 Iceberg+StarRocks 上的裁剪能力**——这是 SEQ 靠 CarbonData 二级索引"内建"而目标架构必须"工程化补齐"的能力差（原理见第四章）。务必在 PoC 阶段用真实规模数据量化验证 **热冷分层 + 排序/Bloom + (兜底)外置索引** 的效果。
 3. **策略是先统计后详单**：第一阶段迁统计数据即可解除"资源隔离 + 存储过程绑定"两大现状痛点并补上"详单不支持多维"短板，**收益快、风险低**；详单待点查方案验证充分后再动，全程灰度 + 可回退。
 4. **客观看待与 SEQ 的差距**：在详单点查与时空分析上短期不及 SEQ 的 CarbonData 内建索引，需接受"用工程化补齐换开放与解耦"的权衡；但中长期随 StarRocks 引擎演进与 Iceberg 索引 GA，差距将收窄，而开放栈的生态与人才优势会持续放大。
 
@@ -357,13 +528,16 @@
 
 | 编号 | 主题 | 参考 |
 |------|------|------|
-| [R1] | 同目录：存储格式/查询效率/加速方式三维度对比 | `./CarbonData-HetuEngine_对比_Iceberg-StarRocks深度分析.md` |
+| [R1] | 同目录：存储格式/查询效率/加速方式三维度对比（完整版） | `./CarbonData-HetuEngine_对比_Iceberg-StarRocks深度分析.md` |
 | [R2] | 同目录：华为 GaussDB/CarbonData 湖仓体系调研 | `./华为GaussDB-CarbonData湖仓一体深度调研与对比分析.md` |
-| [R3] | Apache Iceberg 表格式规范 | https://iceberg.apache.org/spec/ |
-| [R4] | StarRocks External Catalog（Iceberg） | https://docs.starrocks.io/docs/data_source/catalog/iceberg_catalog/ |
-| [R5] | StarRocks Data Cache | https://docs.starrocks.io/docs/data_source/data_cache/ |
-| [R6] | StarRocks 物化视图与查询重写 | https://docs.starrocks.io/docs/using_starrocks/async_mv/Materialized_view/ |
-| [R7] | StarRocks 主键表 / 索引（Bitmap/Bloomfilter/倒排） | https://docs.starrocks.io/docs/table_design/indexes/ |
-| [R8] | StarRocks 资源组（负载隔离） | https://docs.starrocks.io/docs/administration/resource_group/ |
-| [R9] | Apache CarbonData（二级/时空索引、DataMap） | https://carbondata.apache.org/ |
-| [R10] | 华为 SmartCare/SEQ 解决方案（公开资料） | https://www.huawei.com/ |
+| [R3] | Apache Iceberg 表格式规范（metadata/manifest/snapshot） | https://iceberg.apache.org/spec/ |
+| [R4] | Iceberg 隐藏分区与分区演进 | https://iceberg.apache.org/docs/latest/partitioning/ |
+| [R5] | Iceberg Puffin 统计文件格式 | https://iceberg.apache.org/puffin-spec/ |
+| [R6] | StarRocks External Catalog（Iceberg） | https://docs.starrocks.io/docs/data_source/catalog/iceberg_catalog/ |
+| [R7] | StarRocks Data Cache | https://docs.starrocks.io/docs/data_source/data_cache/ |
+| [R8] | StarRocks 物化视图与查询重写 | https://docs.starrocks.io/docs/using_starrocks/async_mv/Materialized_view/ |
+| [R9] | StarRocks 主键表 / 索引（Bitmap/Bloomfilter/倒排） | https://docs.starrocks.io/docs/table_design/indexes/ |
+| [R10] | StarRocks 资源组（负载隔离） | https://docs.starrocks.io/docs/administration/resource_group/ |
+| [R11] | Apache CarbonData（多级/二级/时空索引、DataMap） | https://carbondata.apache.org/ |
+| [R12] | HetuEngine 联邦查询与计算下推 | 华为云 MRS HetuEngine 官方文档 |
+| [R13] | 华为 SmartCare/SEQ 解决方案（公开资料） | https://www.huawei.com/ |
